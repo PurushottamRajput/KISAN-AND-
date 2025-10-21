@@ -1,0 +1,464 @@
+import React, { useState, useEffect } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, addDoc, onSnapshot, query, setLogLevel } from 'firebase/firestore';
+
+// --- Firebase Configuration ---
+// These global variables are expected to be provided by the environment.
+// Corrected to use __firebase_config
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const firebaseConfig = typeof _firebase_config !== 'undefined' && __firebase_config !== '' ? JSON.parse(_firebase_config) : {};
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+
+// --- Main App Component ---
+export default function App() {
+    const [screen, setScreen] = useState('home'); // 'home', 'farmer', 'buyer'
+    const [userId, setUserId] = useState(null);
+    const [db, setDb] = useState(null);
+    const [notification, setNotification] = useState(null); // State for custom notifications
+    
+    // Data states
+    const [seedListings, setSeedListings] = useState([]);
+    const [produceListings, setProduceListings] = useState([]);
+
+    // Initialize Firebase and Auth
+    useEffect(() => {
+        try {
+            if (Object.keys(firebaseConfig).length === 0) {
+                console.error("Firebase Config is missing or empty.");
+                return;
+            }
+
+            const app = initializeApp(firebaseConfig);
+            const auth = getAuth(app);
+            const firestore = getFirestore(app);
+            setDb(firestore);
+            setLogLevel('debug');
+
+            const unsubscribe = onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    setUserId(user.uid);
+                } else {
+                    try {
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                        } else {
+                            // Use a random UUID if auth is truly unavailable, but prioritize signInAnonymously
+                            await signInAnonymously(auth);
+                        }
+                    } catch (error) {
+                        console.error("Authentication failed:", error);
+                    }
+                }
+            });
+            return () => unsubscribe();
+        } catch (error) {
+            console.error("Firebase initialization failed:", error);
+        }
+    }, []);
+
+    // Clear notification after a delay
+    useEffect(() => {
+        if (notification) {
+            const timer = setTimeout(() => {
+                setNotification(null);
+            }, 4000); 
+            return () => clearTimeout(timer);
+        }
+    }, [notification]);
+
+    // Fetch real-time data from Firestore
+    useEffect(() => {
+        if (userId && db) {
+            // Public collections for seeds
+            const seedQuery = query(collection(db, /artifacts/${appId}/public/data/seed_listings));
+            const unsubscribeSeeds = onSnapshot(seedQuery, (querySnapshot) => {
+                const seeds = [];
+                querySnapshot.forEach((doc) => {
+                    seeds.push({ id: doc.id, ...doc.data() });
+                });
+                setSeedListings(seeds);
+            }, (error) => console.error("Error fetching seeds:", error));
+
+            // Public collections for produce
+            const produceQuery = query(collection(db, /artifacts/${appId}/public/data/produce_listings));
+            const unsubscribeProduce = onSnapshot(produceQuery, (querySnapshot) => {
+                const produce = [];
+                querySnapshot.forEach((doc) => {
+                    produce.push({ id: doc.id, ...doc.data() });
+                });
+                setProduceListings(produce);
+            }, (error) => console.error("Error fetching produce:", error));
+
+            return () => {
+                unsubscribeSeeds();
+                unsubscribeProduce();
+            };
+        }
+    }, [userId, db]);
+    
+    // --- Data Handlers ---
+    const handleAddProduce = async (produceData) => {
+        if (!db) return;
+        try {
+            await addDoc(collection(db, /artifacts/${appId}/public/data/produce_listings), {
+                ...produceData,
+                farmerId: userId,
+                createdAt: new Date()
+            });
+            setNotification({ message: 'आपकी उपज सफलतापूर्वक सूचीबद्ध हो गई है!', type: 'success' });
+        } catch (error) {
+            console.error("Error adding produce listing: ", error);
+            setNotification({ message: 'लिस्टिंग जोड़ने में विफल। कृपया पुन: प्रयास करें।', type: 'error' });
+        }
+    };
+
+    const handleAddSeed = async (seedData) => {
+          if (!db) return;
+        try {
+            await addDoc(collection(db, /artifacts/${appId}/public/data/seed_listings), {
+                ...seedData,
+                supplierId: userId,
+                createdAt: new Date()
+            });
+            setNotification({ message: 'आपका बीज सफलतापूर्वक सूचीबद्ध हो गया है!', type: 'success' });
+        } catch (error) {
+            console.error("Error adding seed listing: ", error);
+            setNotification({ message: 'बीज लिस्टिंग जोड़ने में विफल। कृपया पुन: प्रयास करें।', type: 'error' });
+        }
+    };
+
+
+    const renderScreen = () => {
+        switch (screen) {
+            case 'farmer':
+                return <FarmerDashboard setScreen={setScreen} seedListings={seedListings} onAddProduce={handleAddProduce} />;
+            case 'buyer':
+                return <BuyerDashboard setScreen={setScreen} produceListings={produceListings} onAddSeed={handleAddSeed} />;
+            default:
+                return <HomeScreen setScreen={setScreen} />;
+        }
+    };
+
+    return (
+        <div className="bg-gray-50 min-h-screen font-sans text-gray-800 antialiased">
+            <div className="container mx-auto max-w-lg p-0">
+                {renderScreen()}
+                 {userId && (
+                    <footer className="text-center p-4 text-xs text-gray-400 fixed bottom-0 left-0 right-0 max-w-lg mx-auto">
+                        User ID: {userId}
+                    </footer>
+                )}
+                {notification && <Notification message={notification.message} type={notification.type} />}
+            </div>
+        </div>
+    );
+}
+
+// --- Screens ---
+
+const HomeScreen = ({ setScreen }) => (
+    <div className="flex flex-col h-screen justify-between p-6 bg-emerald-50/50">
+        <header className="text-center pt-10">
+            <h1 className="text-4xl font-extrabold text-emerald-800">आयुष-कृषि सेतु</h1>
+        </header>
+
+        <main className="text-center">
+            <h2 className="text-2xl font-bold text-gray-700 mb-2">आयुर्वेद की खेती को एक नया बाज़ार दें</h2>
+            <p className="text-gray-600 mb-12">
+                किसानों को सीधे बीज आपूर्तिकर्ताओं और खरीदारों से जोड़ना।
+            </p>
+
+            <div className="space-y-6">
+                <div onClick={() => setScreen('farmer')} className="bg-white p-8 rounded-2xl shadow-lg border border-emerald-200 transition-transform hover:scale-105 cursor-pointer">
+                    <h3 className="text-2xl font-bold text-emerald-700">मैं किसान हूँ</h3>
+                </div>
+                <div onClick={() => setScreen('buyer')} className="bg-white p-8 rounded-2xl shadow-lg border border-amber-800/20 transition-transform hover:scale-105 cursor-pointer">
+                    <h3 className="text-2xl font-bold text-amber-800">मैं खरीदार/आपूर्तिकर्ता हूँ</h3>
+                </div>
+            </div>
+        </main>
+        
+        <div/>
+    </div>
+);
+
+
+const FarmerDashboard = ({ setScreen, seedListings, onAddProduce }) => {
+    const [activeTab, setActiveTab] = useState('findSeeds'); // 'findSeeds', 'sellProduce'
+    const [searchSeed, setSearchSeed] = useState('');
+    const [newProduce, setNewProduce] = useState({ name: '', quantity: '', price: '', location: 'दरभंगा, बिहार', contact: '' }); // Added contact field
+    const [contactModalData, setContactModalData] = useState(null); // State for contact modal
+
+    const handleProduceSubmit = (e) => {
+        e.preventDefault();
+        if(newProduce.name && newProduce.quantity && newProduce.price && newProduce.location && newProduce.contact) {
+            onAddProduce(newProduce);
+            setNewProduce({ name: '', quantity: '', price: '', location: 'दरभंगा, बिहार', contact: '' });
+        }
+    };
+
+    const filteredSeeds = seedListings.filter(seed => {
+        // Ensure name exists before calling toLowerCase
+        const seedName = seed.name || ''; 
+        return seedName.toLowerCase().includes(searchSeed.toLowerCase());
+    });
+
+    return (
+        <div>
+            <Header title="किसान डैशबोर्ड" onBack={() => setScreen('home')} />
+            <main className="p-4 pb-16">
+                <TabSelector 
+                    tabs={[
+                        { id: 'findSeeds', label: 'बीज ढूंढें' },
+                        { id: 'sellProduce', label: 'अपनी उपज बेचें' }
+                    ]}
+                    activeTab={activeTab}
+                    setActiveTab={setActiveTab}
+                />
+                
+                {activeTab === 'findSeeds' && (
+                    <div className="space-y-4">
+                        <input 
+                            type="text" 
+                            placeholder="बीज का नाम खोजें (जैसे अश्वगंधा)"
+                            value={searchSeed}
+                            onChange={(e) => setSearchSeed(e.target.value)}
+                            className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-emerald-500"
+                        />
+                         {filteredSeeds.length > 0 ? filteredSeeds.map(seed => (
+                            <div key={seed.id} className="bg-white p-4 rounded-xl shadow-md border">
+                                <h3 className="font-bold text-lg text-emerald-800">{seed.name}</h3>
+                                <p className="text-sm text-gray-600">आपूर्तिकर्ता: {seed.supplier || 'N/A'}</p>
+                                <p className="text-sm text-gray-600">मात्रा: {seed.quantity}</p>
+                                <div className="flex justify-between items-center mt-3">
+                                    <span className="font-bold text-lg text-gray-800">₹{seed.price}/kg</span>
+                                    <button 
+                                        onClick={() => setContactModalData({ 
+                                            type: 'आपूर्तिकर्ता', 
+                                            name: seed.supplier || 'N/A', 
+                                            contact: seed.contact 
+                                        })} 
+                                        className="bg-emerald-600 text-white py-2 px-4 rounded-lg shadow-md hover:bg-emerald-700 transition-colors text-sm font-semibold"
+                                    >
+                                        बीज की मांग करें
+                                    </button>
+                                </div>
+                            </div>
+                        )) : <p className="text-center text-gray-500 mt-8">कोई बीज उपलब्ध नहीं है।</p>}
+                    </div>
+                )}
+
+                {activeTab === 'sellProduce' && (
+                    <form onSubmit={handleProduceSubmit} className="bg-white p-6 rounded-2xl shadow-lg border space-y-4">
+                        <FormInput label="फसल का नाम" value={newProduce.name} onChange={e => setNewProduce({...newProduce, name: e.target.value})} placeholder="जैसे सतावरी"/>
+                        <FormInput label="मात्रा (किग्रा/क्विंटल)" value={newProduce.quantity} onChange={e => setNewProduce({...newProduce, quantity: e.target.value})} placeholder="जैसे 10 क्विंटल"/>
+                        <FormInput label="मूल्य प्रति किग्रा (₹)" type="number" value={newProduce.price} onChange={e => setNewProduce({...newProduce, price: e.target.value})} placeholder="जैसे 80" inputMode="decimal"/>
+                        <FormInput label="स्थान" value={newProduce.location} onChange={e => setNewProduce({...newProduce, location: e.target.value})}/>
+                        <FormInput label="संपर्क मोबाइल नंबर" type="tel" value={newProduce.contact} onChange={e => setNewProduce({...newProduce, contact: e.target.value})} placeholder="मोबाइल नंबर (उदा: 9876543210)" inputMode="numeric"/>
+                        <button type="submit" className="w-full bg-emerald-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg hover:bg-emerald-700 transition-transform hover:scale-105">
+                            लिस्टिंग जोड़ें
+                        </button>
+                    </form>
+                )}
+            </main>
+            {contactModalData && <ContactModal data={contactModalData} onClose={() => setContactModalData(null)} />}
+        </div>
+    );
+};
+
+const BuyerDashboard = ({ setScreen, produceListings, onAddSeed }) => {
+    const [activeTab, setActiveTab] = useState('buyProduce'); // 'buyProduce', 'sellSeeds'
+    const [searchProduce, setSearchProduce] = useState('');
+    const [newSeed, setNewSeed] = useState({ name: '', quantity: '', price: '', supplier: '', contact: '' }); // Added contact field
+    const [contactModalData, setContactModalData] = useState(null); // State for contact modal
+
+    const handleSeedSubmit = (e) => {
+        e.preventDefault();
+        if(newSeed.name && newSeed.quantity && newSeed.price && newSeed.supplier && newSeed.contact) {
+            onAddSeed(newSeed);
+            setNewSeed({ name: '', quantity: '', price: '', supplier: '', contact: '' });
+        }
+    };
+    
+    const filteredProduce = produceListings.filter(prod => {
+        // Ensure name exists before calling toLowerCase
+        const produceName = prod.name || ''; 
+        return produceName.toLowerCase().includes(searchProduce.toLowerCase());
+    });
+
+    return (
+        <div>
+            <Header title="खरीदार/आपूर्तिकर्ता डैशबोर्ड" onBack={() => setScreen('home')} />
+            <main className="p-4 pb-16">
+                   <TabSelector 
+                        tabs={[
+                            { id: 'buyProduce', label: 'उपज खरीदें' },
+                            { id: 'sellSeeds', label: 'बीज बेचें' }
+                        ]}
+                        activeTab={activeTab}
+                        setActiveTab={setActiveTab}
+                    />
+
+                {activeTab === 'buyProduce' && (
+                    <div className="space-y-4">
+                        <input 
+                            type="text" 
+                            placeholder="फसल का नाम खोजें (जैसे नीम)"
+                            value={searchProduce}
+                            onChange={(e) => setSearchProduce(e.target.value)}
+                            className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-amber-800/50"
+                        />
+                        {filteredProduce.length > 0 ? filteredProduce.map(prod => (
+                             <div key={prod.id} className="bg-white p-4 rounded-xl shadow-md border">
+                                 <h3 className="font-bold text-lg text-amber-900">{prod.name}</h3>
+                                 {/* Displaying full farmer ID as required */}
+                                 <p className="text-sm text-gray-600">किसान ID: {prod.farmerId || 'अज्ञात'}</p>
+                                 <p className="text-sm text-gray-600">मात्रा: {prod.quantity}</p>
+                                 <p className="text-sm text-gray-600">स्थान: {prod.location}</p>
+                                 <div className="flex justify-between items-center mt-3">
+                                     <span className="font-bold text-lg text-gray-800">₹{prod.price}/kg</span>
+                                     <button 
+                                         onClick={() => setContactModalData({ 
+                                             type: 'किसान', 
+                                             // Pass the full ID to the modal
+                                             name: prod.farmerId || 'अज्ञात', 
+                                             contact: prod.contact 
+                                         })} 
+                                         className="bg-amber-800 text-white py-2 px-4 rounded-lg shadow-md hover:bg-amber-900 transition-colors text-sm font-semibold"
+                                     >
+                                         खरीद के लिए संपर्क करें
+                                     </button>
+                                 </div>
+                             </div>
+                        )) : <p className="text-center text-gray-500 mt-8">कोई उपज उपलब्ध नहीं है।</p>}
+                    </div>
+                )}
+
+                {activeTab === 'sellSeeds' && (
+                    <form onSubmit={handleSeedSubmit} className="bg-white p-6 rounded-2xl shadow-lg border space-y-4">
+                        <FormInput label="बीज का नाम" value={newSeed.name} onChange={e => setNewSeed({...newSeed, name: e.target.value})} placeholder="जैसे अश्वगंधा"/>
+                        <FormInput label="उपलब्ध मात्रा (किग्रा)" value={newSeed.quantity} onChange={e => setNewSeed({...newSeed, quantity: e.target.value})} placeholder="जैसे 5 kg"/>
+                        <FormInput label="मूल्य प्रति किग्रा (₹)" type="number" value={newSeed.price} onChange={e => setNewSeed({...newSeed, price: e.target.value})} placeholder="जैसे 1500" inputMode="decimal"/>
+                        <FormInput label="आपूर्तिकर्ता का नाम" value={newSeed.supplier} onChange={e => setNewSeed({...newSeed, supplier: e.target.value})} placeholder="जैसे राम बीज भंडार"/>
+                        <FormInput label="संपर्क मोबाइल नंबर" type="tel" value={newSeed.contact} onChange={e => setNewSeed({...newSeed, contact: e.target.value})} placeholder="मोबाइल नंबर (उदा: 9876543210)" inputMode="numeric"/>
+                        <button type="submit" className="w-full bg-amber-800 text-white font-bold py-3 px-6 rounded-xl shadow-lg hover:bg-amber-900 transition-transform hover:scale-105">
+                            बीज लिस्टिंग जोड़ें
+                        </button>
+                    </form>
+                )}
+            </main>
+            {contactModalData && <ContactModal data={contactModalData} onClose={() => setContactModalData(null)} />}
+        </div>
+    );
+};
+
+
+// --- Reusable UI Components ---
+
+const Header = ({ title, onBack }) => (
+    <header className="bg-emerald-600 text-white p-4 text-center text-xl font-bold shadow-md sticky top-0 z-10 flex items-center justify-between">
+        <button onClick={onBack} className="text-white">
+             <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+             </svg>
+        </button>
+        <h1 className="flex-grow text-center">{title}</h1>
+        <div className="w-6"></div> {/* Spacer */}
+    </header>
+);
+
+const TabSelector = ({ tabs, activeTab, setActiveTab }) => (
+    <div className="flex justify-center border-b-2 border-gray-200 mb-6">
+        {tabs.map(tab => (
+            <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`flex-1 py-3 text-center font-semibold transition-colors duration-300
+                    ${activeTab === tab.id 
+                        ? 'border-b-4 border-emerald-600 text-emerald-600' 
+                        : 'text-gray-500 hover:text-emerald-500'}`
+                }
+            >
+                {tab.label}
+            </button>
+        ))}
+    </div>
+);
+
+const FormInput = ({ label, type = 'text', value, onChange, placeholder, inputMode }) => (
+    <div>
+        <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label>
+        <input 
+            type={type}
+            value={value}
+            onChange={onChange}
+            placeholder={placeholder}
+            required
+            inputMode={inputMode}
+            className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition"
+        />
+    </div>
+);
+
+const Notification = ({ message, type }) => {
+    const baseClasses = "fixed bottom-16 left-1/2 transform -translate-x-1/2 px-6 py-3 rounded-xl text-white shadow-xl z-50 text-sm font-semibold transition-all duration-300";
+    const colorClasses = type === 'success' ? 'bg-emerald-600' : 'bg-red-600';
+
+    return (
+        <div className={${baseClasses} ${colorClasses}}>
+            {message}
+        </div>
+    );
+};
+
+const ContactModal = ({ data, onClose }) => {
+    const handleCopy = () => {
+        // Fallback for copying text to clipboard in iframe environment
+        const tempInput = document.createElement('input');
+        tempInput.value = data.contact;
+        document.body.appendChild(tempInput);
+        tempInput.select();
+        document.execCommand('copy');
+        document.body.removeChild(tempInput);
+        onClose(); 
+    };
+
+    const contactType = data.type === 'किसान' ? 'खरीद' : 'बीज';
+    const contactInfo = data.contact || 'उपलब्ध नहीं';
+    const contactClass = contactInfo !== 'उपलब्ध नहीं' ? 'text-lg text-gray-800 font-bold' : 'text-base text-red-500 font-semibold';
+
+    return (
+        <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4" onClick={onClose}>
+            <div 
+                className="bg-white p-6 rounded-2xl shadow-2xl w-full max-w-sm" 
+                onClick={e => e.stopPropagation()} // Prevent closing when clicking inside modal
+            >
+                <h3 className="text-xl font-bold text-gray-800 mb-4">{contactType} के लिए संपर्क करें</h3>
+                <p className="text-gray-600 mb-2">{data.type} का नाम/ID:</p>
+                <p className="text-xl font-semibold text-emerald-700 mb-4 break-all">{data.name}</p>
+
+                <p className="text-gray-600 mb-2">मोबाइल नंबर:</p>
+                <p className={contactClass}>{contactInfo}</p>
+
+                <div className="mt-6 flex justify-between space-x-3">
+                    <button 
+                        onClick={onClose} 
+                        className="flex-1 bg-gray-200 text-gray-800 py-3 rounded-xl font-semibold transition-colors hover:bg-gray-300"
+                    >
+                        बंद करें
+                    </button>
+                    <button 
+                        onClick={handleCopy} 
+                        disabled={contactInfo === 'उपलब्ध नहीं'}
+                        className={`flex-1 text-white py-3 rounded-xl font-semibold transition-colors 
+                            ${contactInfo !== 'उपलब्ध नहीं' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-gray-400 cursor-not-allowed'}`}
+                    >
+                        नंबर कॉपी करें
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
